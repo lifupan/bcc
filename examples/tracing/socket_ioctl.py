@@ -23,6 +23,7 @@ bpf_text = """
 #include <uapi/linux/ptrace.h>
 #include <uapi/linux/sockios.h>
 #include <uapi/linux/if.h>
+#include <uapi/linux/in.h>
 #include <linux/fs.h>
 #include <bcc/proto.h>
 
@@ -31,11 +32,9 @@ BPF_HASH(currsock, u32, unsigned long);
 int kprobe__sock_ioctl(struct pt_regs *ctx, struct file *file, unsigned cmd, unsigned long arg)
 {
         if (cmd != SIOCGIFCONF ) {
-	  //  bpf_trace_printk("trace_sock_ioctl cmd=%d\\n", cmd);
             return 0;
         }
 
-//	bpf_trace_printk("trace_sock_ioctl cmd-SIOCGIFCONF=%d\\n", cmd);
 	u32 pid = bpf_get_current_pid_tgid();
 
 	// stash the sock ptr for lookup on return
@@ -49,6 +48,9 @@ int kretprobe__sock_ioctl(struct pt_regs *ctx)
 	int ret = PT_REGS_RC(ctx);
 	u32 pid = bpf_get_current_pid_tgid();
 
+        // the ip addr: 192.168.0.2
+        uint32_t addr_filter = 33597632;
+
         unsigned long *arg;
 	arg = currsock.lookup(&pid);
 	if (arg == NULL) {
@@ -58,21 +60,25 @@ int kretprobe__sock_ioctl(struct pt_regs *ctx)
         struct ifconf ifc;
 
         bpf_probe_read_user(&ifc, sizeof(ifc), (const void *)*arg);
+
+        struct ifreq *req = (struct ifreq *)(ifc.ifc_buf + ifc.ifc_len - sizeof(struct ifreq));
+        
+        struct sockaddr *sockaddr = &(req->ifr_addr);
+        struct sockaddr_in * sockaddrin = (struct sockaddr_in *)sockaddr;
+
+        uint32_t addr;
+        bpf_probe_read_user(&addr, sizeof(uint32_t), (uint32_t *)(&(sockaddrin->sin_addr).s_addr));
+
+        if (addr != addr_filter) {
+            return 0;
+        }
+
         ifc.ifc_len -= sizeof(struct ifreq);
-
-	// output
-        char *ifreq_p;
-        ifreq_p = (char *)ifc.ifc_buf;
-        ifreq_p += ifc.ifc_len;
-   //     struct ifreq req;
-  //      memset(&req, 0, sizeof(req));
-
-  //      bpf_probe_write_user(ifreq_p, &req, sizeof(req));
-
-
         int retn = bpf_probe_write_user((void *)*arg, &ifc, sizeof(ifc));
 
-	bpf_trace_printk("trace_sock_ioctl %d, %d, %d\\n", ifc.ifc_len, sizeof(struct ifreq), retn);
+        unsigned char * str_addr = (unsigned char *)&addr;
+	bpf_trace_printk("trace_sock_ioctl %u, %u\\n", str_addr[0], str_addr[1]);
+	bpf_trace_printk("trace_sock_ioctl %u, %u\\n", str_addr[2], str_addr[3]);
 
 	currsock.delete(&pid);
 
